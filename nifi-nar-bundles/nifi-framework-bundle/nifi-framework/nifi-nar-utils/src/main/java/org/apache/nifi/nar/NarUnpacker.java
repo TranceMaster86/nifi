@@ -16,14 +16,6 @@
  */
 package org.apache.nifi.nar;
 
-import org.apache.nifi.bundle.Bundle;
-import org.apache.nifi.bundle.BundleCoordinate;
-import org.apache.nifi.util.FileUtils;
-import org.apache.nifi.util.NiFiProperties;
-import org.apache.nifi.util.StringUtils;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileFilter;
@@ -49,6 +41,13 @@ import java.util.jar.Attributes;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
 import java.util.jar.Manifest;
+import org.apache.nifi.bundle.Bundle;
+import org.apache.nifi.bundle.BundleCoordinate;
+import org.apache.nifi.util.FileUtils;
+import org.apache.nifi.util.NiFiProperties;
+import org.apache.nifi.util.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  *
@@ -196,10 +195,15 @@ public final class NarUnpacker {
             final File unpackedNar = entry.getKey();
             final BundleCoordinate bundleCoordinate = entry.getValue();
 
-            final File bundledDependencies = new File(unpackedNar, "META-INF/bundled-dependencies");
+            final File bundledDependencies = new File(unpackedNar, "NAR-INF/bundled-dependencies");
 
             unpackBundleDocs(docsDirectory, mapping, bundleCoordinate, bundledDependencies);
         }
+    }
+
+    public static void mapExtension(final File unpackedNar, final BundleCoordinate bundleCoordinate, final File docsDirectory, final ExtensionMapping mapping) throws IOException {
+        final File bundledDependencies = new File(unpackedNar, "NAR-INF/bundled-dependencies");
+        unpackBundleDocs(docsDirectory, mapping, bundleCoordinate, bundledDependencies);
     }
 
     private static void unpackBundleDocs(final File docsDirectory, final ExtensionMapping mapping, final BundleCoordinate bundleCoordinate, final File bundledDirectory) throws IOException {
@@ -221,7 +225,7 @@ public final class NarUnpacker {
      * @return the directory to the unpacked NAR
      * @throws IOException if unable to explode nar
      */
-    private static File unpackNar(final File nar, final File baseWorkingDirectory) throws IOException {
+    public static File unpackNar(final File nar, final File baseWorkingDirectory) throws IOException {
         final File narWorkingDirectory = new File(baseWorkingDirectory, nar.getName() + "-unpacked");
 
         // if the working directory doesn't exist, unpack the nar
@@ -262,9 +266,12 @@ public final class NarUnpacker {
             while (jarEntries.hasMoreElements()) {
                 JarEntry jarEntry = jarEntries.nextElement();
                 String name = jarEntry.getName();
+                if(name.contains("META-INF/bundled-dependencies")){
+                    name = name.replace("META-INF/bundled-dependencies", "NAR-INF/bundled-dependencies");
+                }
                 File f = new File(workingDirectory, name);
                 if (jarEntry.isDirectory()) {
-                    FileUtils.ensureDirectoryExistAndCanAccess(f);
+                    FileUtils.ensureDirectoryExistAndCanReadAndWrite(f);
                 } else {
                     makeFile(jarFile.getInputStream(jarEntry), f);
                 }

@@ -16,21 +16,12 @@
  */
 package org.apache.nifi.processors.standard;
 
-import java.nio.charset.Charset;
-import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
-import java.sql.SQLException;
-import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicLong;
 
-import org.apache.commons.io.IOUtils;
 import org.apache.nifi.annotation.behavior.EventDriven;
 import org.apache.nifi.annotation.behavior.InputRequirement;
 import org.apache.nifi.annotation.behavior.InputRequirement.Requirement;
@@ -40,21 +31,16 @@ import org.apache.nifi.annotation.behavior.WritesAttribute;
 import org.apache.nifi.annotation.behavior.WritesAttributes;
 import org.apache.nifi.annotation.documentation.CapabilityDescription;
 import org.apache.nifi.annotation.documentation.Tags;
-import org.apache.nifi.annotation.lifecycle.OnScheduled;
 import org.apache.nifi.components.PropertyDescriptor;
-import org.apache.nifi.dbcp.DBCPService;
 import org.apache.nifi.expression.ExpressionLanguageScope;
 import org.apache.nifi.flowfile.FlowFile;
-import org.apache.nifi.flowfile.attributes.CoreAttributes;
-import org.apache.nifi.logging.ComponentLog;
-import org.apache.nifi.processor.AbstractProcessor;
 import org.apache.nifi.processor.ProcessContext;
 import org.apache.nifi.processor.ProcessSession;
 import org.apache.nifi.processor.Relationship;
-import org.apache.nifi.processor.exception.ProcessException;
-import org.apache.nifi.processor.util.StandardValidators;
+import org.apache.nifi.processors.standard.sql.DefaultAvroSqlWriter;
+import org.apache.nifi.processors.standard.sql.SqlWriter;
 import org.apache.nifi.processors.standard.util.JdbcCommon;
-import org.apache.nifi.util.StopWatch;
+import org.apache.nifi.processors.standard.util.AvroUtil.CodecType;
 
 import static org.apache.nifi.processors.standard.util.JdbcCommon.DEFAULT_PRECISION;
 import static org.apache.nifi.processors.standard.util.JdbcCommon.DEFAULT_SCALE;
@@ -91,62 +77,40 @@ import static org.apache.nifi.processors.standard.util.JdbcCommon.USE_AVRO_LOGIC
                 + "'yyyy-MM-dd HH:mm:ss.SSS' for Timestamp is used.")
 })
 @WritesAttributes({
-    @WritesAttribute(attribute="executesql.row.count", description = "Contains the number of rows returned in the select query"),
-    @WritesAttribute(attribute="executesql.query.duration", description = "Combined duration of the query execution time and fetch time in milliseconds"),
-    @WritesAttribute(attribute="executesql.query.executiontime", description = "Duration of the query execution time in milliseconds"),
-    @WritesAttribute(attribute="executesql.query.fetchtime", description = "Duration of the result set fetch time in milliseconds"),
-    @WritesAttribute(attribute="executesql.resultset.index", description = "Assuming multiple result sets are returned, "
-       + "the zero based index of this result set.")
+        @WritesAttribute(attribute = "executesql.row.count", description = "Contains the number of rows returned by the query. "
+                + "If 'Max Rows Per Flow File' is set, then this number will reflect the number of rows in the Flow File instead of the entire result set."),
+        @WritesAttribute(attribute = "executesql.query.duration", description = "Combined duration of the query execution time and fetch time in milliseconds. "
+                + "If 'Max Rows Per Flow File' is set, then this number will reflect only the fetch time for the rows in the Flow File instead of the entire result set."),
+        @WritesAttribute(attribute = "executesql.query.executiontime", description = "Duration of the query execution time in milliseconds. "
+                + "This number will reflect the query execution time regardless of the 'Max Rows Per Flow File' setting."),
+        @WritesAttribute(attribute = "executesql.query.fetchtime", description = "Duration of the result set fetch time in milliseconds. "
+                + "If 'Max Rows Per Flow File' is set, then this number will reflect only the fetch time for the rows in the Flow File instead of the entire result set."),
+        @WritesAttribute(attribute = "executesql.resultset.index", description = "Assuming multiple result sets are returned, "
+                + "the zero based index of this result set."),
+        @WritesAttribute(attribute = "executesql.error.message", description = "If processing an incoming flow file causes "
+                + "an Exception, the Flow File is routed to failure and this attribute is set to the exception message."),
+        @WritesAttribute(attribute = "fragment.identifier", description = "If 'Max Rows Per Flow File' is set then all FlowFiles from the same query result set "
+                + "will have the same value for the fragment.identifier attribute. This can then be used to correlate the results."),
+        @WritesAttribute(attribute = "fragment.count", description = "If 'Max Rows Per Flow File' is set then this is the total number of  "
+                + "FlowFiles produced by a single ResultSet. This can be used in conjunction with the "
+                + "fragment.identifier attribute in order to know how many FlowFiles belonged to the same incoming ResultSet. If Output Batch Size is set, then this "
+                + "attribute will not be populated."),
+        @WritesAttribute(attribute = "fragment.index", description = "If 'Max Rows Per Flow File' is set then the position of this FlowFile in the list of "
+                + "outgoing FlowFiles that were all derived from the same result set FlowFile. This can be "
+                + "used in conjunction with the fragment.identifier attribute to know which FlowFiles originated from the same query result set and in what order  "
+                + "FlowFiles were produced")
 })
-public class ExecuteSQL extends AbstractProcessor {
+public class ExecuteSQL extends AbstractExecuteSQL {
 
-    public static final String RESULT_ROW_COUNT = "executesql.row.count";
-    public static final String RESULT_QUERY_DURATION = "executesql.query.duration";
-    public static final String RESULT_QUERY_EXECUTION_TIME = "executesql.query.executiontime";
-    public static final String RESULT_QUERY_FETCH_TIME = "executesql.query.fetchtime";
-    public static final String RESULTSET_INDEX = "executesql.resultset.index";
-
-    // Relationships
-    public static final Relationship REL_SUCCESS = new Relationship.Builder()
-            .name("success")
-            .description("Successfully created FlowFile from SQL query result set.")
-            .build();
-    public static final Relationship REL_FAILURE = new Relationship.Builder()
-            .name("failure")
-            .description("SQL query execution failed. Incoming FlowFile will be penalized and routed to this relationship")
-            .build();
-    private final Set<Relationship> relationships;
-
-    public static final PropertyDescriptor DBCP_SERVICE = new PropertyDescriptor.Builder()
-            .name("Database Connection Pooling Service")
-            .description("The Controller Service that is used to obtain connection to database")
+    public static final PropertyDescriptor COMPRESSION_FORMAT = new PropertyDescriptor.Builder()
+            .name("compression-format")
+            .displayName("Compression Format")
+            .description("Compression type to use when writing Avro files. Default is None.")
+            .allowableValues(CodecType.values())
+            .defaultValue(CodecType.NONE.toString())
+            .expressionLanguageSupported(ExpressionLanguageScope.NONE)
             .required(true)
-            .identifiesControllerService(DBCPService.class)
             .build();
-
-    public static final PropertyDescriptor SQL_SELECT_QUERY = new PropertyDescriptor.Builder()
-            .name("SQL select query")
-            .description("The SQL select query to execute. The query can be empty, a constant value, or built from attributes "
-                    + "using Expression Language. If this property is specified, it will be used regardless of the content of "
-                    + "incoming flowfiles. If this property is empty, the content of the incoming flow file is expected "
-                    + "to contain a valid SQL select query, to be issued by the processor to the database. Note that Expression "
-                    + "Language is not evaluated for flow file contents.")
-            .required(false)
-            .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
-            .expressionLanguageSupported(ExpressionLanguageScope.FLOWFILE_ATTRIBUTES)
-            .build();
-
-    public static final PropertyDescriptor QUERY_TIMEOUT = new PropertyDescriptor.Builder()
-            .name("Max Wait Time")
-            .description("The maximum amount of time allowed for a running SQL select query "
-                    + " , zero means there is no limit. Max time less than 1 second will be equal to zero.")
-            .defaultValue("0 seconds")
-            .required(true)
-            .addValidator(StandardValidators.TIME_PERIOD_VALIDATOR)
-            .sensitive(false)
-            .build();
-
-    private final List<PropertyDescriptor> propDescriptors;
 
     public ExecuteSQL() {
         final Set<Relationship> r = new HashSet<>();
@@ -156,186 +120,37 @@ public class ExecuteSQL extends AbstractProcessor {
 
         final List<PropertyDescriptor> pds = new ArrayList<>();
         pds.add(DBCP_SERVICE);
+        pds.add(SQL_PRE_QUERY);
         pds.add(SQL_SELECT_QUERY);
+        pds.add(SQL_POST_QUERY);
         pds.add(QUERY_TIMEOUT);
         pds.add(NORMALIZE_NAMES_FOR_AVRO);
         pds.add(USE_AVRO_LOGICAL_TYPES);
+        pds.add(COMPRESSION_FORMAT);
         pds.add(DEFAULT_PRECISION);
         pds.add(DEFAULT_SCALE);
+        pds.add(MAX_ROWS_PER_FLOW_FILE);
+        pds.add(OUTPUT_BATCH_SIZE);
         propDescriptors = Collections.unmodifiableList(pds);
     }
 
     @Override
-    public Set<Relationship> getRelationships() {
-        return relationships;
-    }
-
-    @Override
-    protected List<PropertyDescriptor> getSupportedPropertyDescriptors() {
-        return propDescriptors;
-    }
-
-    @OnScheduled
-    public void setup(ProcessContext context) {
-        // If the query is not set, then an incoming flow file is needed. Otherwise fail the initialization
-        if (!context.getProperty(SQL_SELECT_QUERY).isSet() && !context.hasIncomingConnection()) {
-            final String errorString = "Either the Select Query must be specified or there must be an incoming connection "
-                    + "providing flowfile(s) containing a SQL select query";
-            getLogger().error(errorString);
-            throw new ProcessException(errorString);
-        }
-    }
-
-    @Override
-    public void onTrigger(final ProcessContext context, final ProcessSession session) throws ProcessException {
-        FlowFile fileToProcess = null;
-        if (context.hasIncomingConnection()) {
-            fileToProcess = session.get();
-
-            // If we have no FlowFile, and all incoming connections are self-loops then we can continue on.
-            // However, if we have no FlowFile and we have connections coming from other Processors, then
-            // we know that we should run only if we have a FlowFile.
-            if (fileToProcess == null && context.hasNonLoopConnection()) {
-                return;
-            }
-        }
-
-        final ComponentLog logger = getLogger();
-        final DBCPService dbcpService = context.getProperty(DBCP_SERVICE).asControllerService(DBCPService.class);
-        final Integer queryTimeout = context.getProperty(QUERY_TIMEOUT).asTimePeriod(TimeUnit.SECONDS).intValue();
+    protected SqlWriter configureSqlWriter(ProcessSession session, ProcessContext context, FlowFile fileToProcess) {
         final boolean convertNamesForAvro = context.getProperty(NORMALIZE_NAMES_FOR_AVRO).asBoolean();
         final Boolean useAvroLogicalTypes = context.getProperty(USE_AVRO_LOGICAL_TYPES).asBoolean();
+        final Integer maxRowsPerFlowFile = context.getProperty(MAX_ROWS_PER_FLOW_FILE).evaluateAttributeExpressions().asInteger();
         final Integer defaultPrecision = context.getProperty(DEFAULT_PRECISION).evaluateAttributeExpressions(fileToProcess).asInteger();
         final Integer defaultScale = context.getProperty(DEFAULT_SCALE).evaluateAttributeExpressions(fileToProcess).asInteger();
-        final String selectQuery;
-        if (context.getProperty(SQL_SELECT_QUERY).isSet()) {
-            selectQuery = context.getProperty(SQL_SELECT_QUERY).evaluateAttributeExpressions(fileToProcess).getValue();
-        } else {
-            // If the query is not set, then an incoming flow file is required, and expected to contain a valid SQL select query.
-            // If there is no incoming connection, onTrigger will not be called as the processor will fail when scheduled.
-            final StringBuilder queryContents = new StringBuilder();
-            session.read(fileToProcess, in -> queryContents.append(IOUtils.toString(in, Charset.defaultCharset())));
-            selectQuery = queryContents.toString();
-        }
+        final String codec = context.getProperty(COMPRESSION_FORMAT).getValue();
 
-        int resultCount=0;
-        try (final Connection con = dbcpService.getConnection(fileToProcess == null ? Collections.emptyMap() : fileToProcess.getAttributes());
-            final PreparedStatement st = con.prepareStatement(selectQuery)) {
-            st.setQueryTimeout(queryTimeout); // timeout in seconds
-
-            if (fileToProcess != null) {
-                JdbcCommon.setParameters(st, fileToProcess.getAttributes());
-            }
-            logger.debug("Executing query {}", new Object[]{selectQuery});
-            final StopWatch executionTime = new StopWatch(true);
-
-            boolean hasResults = st.execute();
-
-            long executionTimeElapsed = executionTime.getElapsed(TimeUnit.MILLISECONDS);
-
-            boolean hasUpdateCount = st.getUpdateCount() != -1;
-
-            while(hasResults || hasUpdateCount) {
-                //getMoreResults() and execute() return false to indicate that the result of the statement is just a number and not a ResultSet
-                if (hasResults) {
-                    FlowFile resultSetFF;
-                    if (fileToProcess == null) {
-                        resultSetFF = session.create();
-                    } else {
-                        resultSetFF = session.create(fileToProcess);
-                        resultSetFF = session.putAllAttributes(resultSetFF, fileToProcess.getAttributes());
-                    }
-
-                    final StopWatch fetchTime = new StopWatch(true);
-
-                    final AtomicLong nrOfRows = new AtomicLong(0L);
-                    resultSetFF = session.write(resultSetFF, out -> {
-                        try {
-
-                            final ResultSet resultSet = st.getResultSet();
-                            final JdbcCommon.AvroConversionOptions options = JdbcCommon.AvroConversionOptions.builder()
-                                    .convertNames(convertNamesForAvro)
-                                    .useLogicalTypes(useAvroLogicalTypes)
-                                    .defaultPrecision(defaultPrecision)
-                                    .defaultScale(defaultScale)
-                                    .build();
-                            nrOfRows.set(JdbcCommon.convertToAvroStream(resultSet, out, options, null));
-                        } catch (final SQLException e) {
-                            throw new ProcessException(e);
-                        }
-                    });
-
-                    long fetchTimeElapsed = fetchTime.getElapsed(TimeUnit.MILLISECONDS);
-
-                    // set attribute how many rows were selected
-                    resultSetFF = session.putAttribute(resultSetFF, RESULT_ROW_COUNT, String.valueOf(nrOfRows.get()));
-                    resultSetFF = session.putAttribute(resultSetFF, RESULT_QUERY_DURATION, String.valueOf(executionTimeElapsed + fetchTimeElapsed));
-                    resultSetFF = session.putAttribute(resultSetFF, RESULT_QUERY_EXECUTION_TIME, String.valueOf(executionTimeElapsed));
-                    resultSetFF = session.putAttribute(resultSetFF, RESULT_QUERY_FETCH_TIME, String.valueOf(fetchTimeElapsed));
-                    resultSetFF = session.putAttribute(resultSetFF, CoreAttributes.MIME_TYPE.key(), JdbcCommon.MIME_TYPE_AVRO_BINARY);
-                    resultSetFF = session.putAttribute(resultSetFF, RESULTSET_INDEX, String.valueOf(resultCount));
-
-                    logger.info("{} contains {} Avro records; transferring to 'success'",
-                            new Object[]{resultSetFF, nrOfRows.get()});
-                    session.getProvenanceReporter().modifyContent(resultSetFF, "Retrieved " + nrOfRows.get() + " rows", executionTimeElapsed + fetchTimeElapsed);
-                    session.transfer(resultSetFF, REL_SUCCESS);
-
-                    resultCount++;
-                }
-
-                // are there anymore result sets?
-                try{
-                    hasResults = st.getMoreResults(Statement.CLOSE_CURRENT_RESULT);
-                    hasUpdateCount = st.getUpdateCount() != -1;
-                } catch(SQLException ex){
-                    hasResults = false;
-                    hasUpdateCount = false;
-                }
-            }
-
-            //If we had at least one result then it's OK to drop the original file, but if we had no results then
-            //  pass the original flow file down the line to trigger downstream processors
-            if(fileToProcess != null){
-                if(resultCount > 0){
-                    session.remove(fileToProcess);
-                } else {
-                    fileToProcess = session.write(fileToProcess, JdbcCommon::createEmptyAvroStream);
-
-                    fileToProcess = session.putAttribute(fileToProcess, RESULT_ROW_COUNT, "0");
-                    fileToProcess = session.putAttribute(fileToProcess, CoreAttributes.MIME_TYPE.key(), JdbcCommon.MIME_TYPE_AVRO_BINARY);
-                    session.transfer(fileToProcess, REL_SUCCESS);
-                }
-            } else if(resultCount == 0){
-                //If we had no inbound FlowFile, no exceptions, and the SQL generated no result sets (Insert/Update/Delete statements only)
-                // Then generate an empty Output FlowFile
-                FlowFile resultSetFF = session.create();
-
-                resultSetFF = session.write(resultSetFF, out -> JdbcCommon.createEmptyAvroStream(out));
-
-                resultSetFF = session.putAttribute(resultSetFF, RESULT_ROW_COUNT, "0");
-                resultSetFF = session.putAttribute(resultSetFF, CoreAttributes.MIME_TYPE.key(), JdbcCommon.MIME_TYPE_AVRO_BINARY);
-                session.transfer(resultSetFF, REL_SUCCESS);
-            }
-        } catch (final ProcessException | SQLException e) {
-            //If we had at least one result then it's OK to drop the original file, but if we had no results then
-            //  pass the original flow file down the line to trigger downstream processors
-            if (fileToProcess == null) {
-                // This can happen if any exceptions occur while setting up the connection, statement, etc.
-                logger.error("Unable to execute SQL select query {} due to {}. No FlowFile to route to failure",
-                        new Object[]{selectQuery, e});
-                context.yield();
-            } else {
-                if (context.hasIncomingConnection()) {
-                    logger.error("Unable to execute SQL select query {} for {} due to {}; routing to failure",
-                            new Object[]{selectQuery, fileToProcess, e});
-                    fileToProcess = session.penalize(fileToProcess);
-                } else {
-                    logger.error("Unable to execute SQL select query {} due to {}; routing to failure",
-                            new Object[]{selectQuery, e});
-                    context.yield();
-                }
-                session.transfer(fileToProcess, REL_FAILURE);
-            }
-        }
+        final JdbcCommon.AvroConversionOptions options = JdbcCommon.AvroConversionOptions.builder()
+                .convertNames(convertNamesForAvro)
+                .useLogicalTypes(useAvroLogicalTypes)
+                .defaultPrecision(defaultPrecision)
+                .defaultScale(defaultScale)
+                .maxRows(maxRowsPerFlowFile)
+                .codecFactory(codec)
+                .build();
+        return new DefaultAvroSqlWriter(options);
     }
 }

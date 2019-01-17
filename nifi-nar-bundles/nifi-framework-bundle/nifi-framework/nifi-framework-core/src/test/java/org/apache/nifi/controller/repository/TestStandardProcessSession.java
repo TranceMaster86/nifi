@@ -16,54 +16,13 @@
  */
 package org.apache.nifi.controller.repository;
 
-import static org.junit.Assert.assertArrayEquals;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertTrue;
-import static org.mockito.Matchers.any;
-import static org.mockito.Matchers.notNull;
-import static org.mockito.Mockito.doThrow;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
-
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileNotFoundException;
-import java.io.FileOutputStream;
-import java.io.FilterOutputStream;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicReference;
-import java.util.regex.Pattern;
-
 import org.apache.nifi.connectable.Connectable;
 import org.apache.nifi.connectable.ConnectableType;
 import org.apache.nifi.connectable.Connection;
 import org.apache.nifi.controller.ProcessScheduler;
-import org.apache.nifi.controller.StandardFlowFileQueue;
 import org.apache.nifi.controller.queue.FlowFileQueue;
+import org.apache.nifi.controller.queue.NopConnectionEventListener;
+import org.apache.nifi.controller.queue.StandardFlowFileQueue;
 import org.apache.nifi.controller.repository.claim.ContentClaim;
 import org.apache.nifi.controller.repository.claim.ResourceClaim;
 import org.apache.nifi.controller.repository.claim.ResourceClaimManager;
@@ -97,6 +56,49 @@ import org.junit.Test;
 import org.mockito.Mockito;
 import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
+
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
+import java.io.FilterOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.regex.Pattern;
+
+import static org.junit.Assert.assertArrayEquals;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertTrue;
+import static org.mockito.Matchers.any;
+import static org.mockito.Matchers.notNull;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 public class TestStandardProcessSession {
 
@@ -206,7 +208,7 @@ public class TestStandardProcessSession {
         final FlowFileSwapManager swapManager = Mockito.mock(FlowFileSwapManager.class);
         final ProcessScheduler processScheduler = Mockito.mock(ProcessScheduler.class);
 
-        final StandardFlowFileQueue actualQueue = new StandardFlowFileQueue("1", connection, flowFileRepo, provenanceRepo, null,
+        final StandardFlowFileQueue actualQueue = new StandardFlowFileQueue("1", new NopConnectionEventListener(), flowFileRepo, provenanceRepo, null,
                 processScheduler, swapManager, null, 10000, 0L, "0 B");
         return Mockito.spy(actualQueue);
     }
@@ -928,6 +930,29 @@ public class TestStandardProcessSession {
     }
 
     @Test
+    public void testProvenanceEventsHaveDurationFromSession() throws IOException {
+        final FlowFileRecord flowFileRecord = new StandardFlowFileRecord.Builder()
+                .addAttribute("uuid", "12345678-1234-1234-1234-123456789012")
+                .entryDate(System.currentTimeMillis())
+                .build();
+
+        flowFileQueue.put(flowFileRecord);
+
+        final FlowFile orig = session.get();
+        final FlowFile newFlowFile = session.create(orig);
+        session.getProvenanceReporter().fork(orig, Collections.singletonList(newFlowFile), 0L);
+        session.getProvenanceReporter().fetch(newFlowFile, "nowhere://");
+        session.getProvenanceReporter().send(newFlowFile, "nowhere://");
+        session.transfer(newFlowFile, new Relationship.Builder().name("A").build());
+        session.commit();
+
+        List<ProvenanceEventRecord> events = provenanceRepo.getEvents(0L, 100000);
+        assertNotNull(events);
+        assertEquals(3, events.size()); // FETCH, SEND, and FORK
+        events.forEach((event) -> assertTrue(event.getEventDuration() > -1));
+    }
+
+    @Test
     public void testUuidAttributeCannotBeUpdated() {
         String originalUuid = "11111111-1111-1111-1111-111111111111";
         final FlowFileRecord flowFileRecord1 = new StandardFlowFileRecord.Builder()
@@ -1491,7 +1516,7 @@ public class TestStandardProcessSession {
 
         final FlowFile originalFlowFile = session.get();
         assertTrue(flowFileQueue.isActiveQueueEmpty());
-        assertEquals(1, flowFileQueue.getUnacknowledgedQueueSize().getObjectCount());
+        assertTrue(flowFileQueue.isUnacknowledgedFlowFile());
 
         final FlowFile modified = session.write(originalFlowFile, new OutputStreamCallback() {
             @Override
@@ -1514,7 +1539,7 @@ public class TestStandardProcessSession {
 
         assertFalse(flowFileQueue.isActiveQueueEmpty());
         assertEquals(1, flowFileQueue.size().getObjectCount());
-        assertEquals(0, flowFileQueue.getUnacknowledgedQueueSize().getObjectCount());
+        assertFalse(flowFileQueue.isUnacknowledgedFlowFile());
     }
 
     @Test
@@ -1528,7 +1553,7 @@ public class TestStandardProcessSession {
 
         final FlowFile originalFlowFile = session.get();
         assertTrue(flowFileQueue.isActiveQueueEmpty());
-        assertEquals(1, flowFileQueue.getUnacknowledgedQueueSize().getObjectCount());
+        assertTrue(flowFileQueue.isUnacknowledgedFlowFile());
 
         final FlowFile modified = session.write(originalFlowFile, new OutputStreamCallback() {
             @Override
@@ -1545,7 +1570,7 @@ public class TestStandardProcessSession {
         session.rollback();
         assertTrue(flowFileQueue.isActiveQueueEmpty());
         assertEquals(0, flowFileQueue.size().getObjectCount());
-        assertEquals(0, flowFileQueue.getUnacknowledgedQueueSize().getObjectCount());
+        assertFalse(flowFileQueue.isUnacknowledgedFlowFile());
 
         session.rollback();
 
@@ -1554,7 +1579,7 @@ public class TestStandardProcessSession {
 
         final FlowFile originalRound2 = session.get();
         assertTrue(flowFileQueue.isActiveQueueEmpty());
-        assertEquals(1, flowFileQueue.getUnacknowledgedQueueSize().getObjectCount());
+        assertTrue(flowFileQueue.isUnacknowledgedFlowFile());
 
         final FlowFile modifiedRound2 = session.write(originalRound2, new OutputStreamCallback() {
             @Override
@@ -1567,13 +1592,13 @@ public class TestStandardProcessSession {
 
         session.checkpoint();
         assertTrue(flowFileQueue.isActiveQueueEmpty());
-        assertEquals(1, flowFileQueue.getUnacknowledgedQueueSize().getObjectCount());
+        assertTrue(flowFileQueue.isUnacknowledgedFlowFile());
 
         session.commit();
 
         // FlowFile transferred back to queue
         assertEquals(1, flowFileQueue.size().getObjectCount());
-        assertEquals(0, flowFileQueue.getUnacknowledgedQueueSize().getObjectCount());
+        assertFalse(flowFileQueue.isUnacknowledgedFlowFile());
         assertFalse(flowFileQueue.isActiveQueueEmpty());
     }
 
@@ -1648,6 +1673,30 @@ public class TestStandardProcessSession {
 
         final List<FlowFile> flowFiles = session.get(7);
         assertEquals(7, flowFiles.size());
+    }
+
+    @Test
+    public void testBatchQueuedHaveSameQueuedTime() {
+        for (int i = 0; i < 100; i++) {
+            final FlowFileRecord flowFile = new StandardFlowFileRecord.Builder()
+                    .id(i)
+                    .addAttribute("uuid", "000000000000-0000-0000-0000-0000000" + i)
+                    .build();
+            this.flowFileQueue.put(flowFile);
+        }
+
+        final List<FlowFile> flowFiles = session.get(100);
+
+        // FlowFile Queued times should not match yet
+        assertNotEquals("Queued times should not be equal.", flowFiles.get(0).getLastQueueDate(), flowFiles.get(99).getLastQueueDate());
+
+        session.transfer(flowFiles, new Relationship.Builder().name("A").build());
+        session.commit();
+
+        final List<FlowFile> flowFilesUpdated = session.get(100);
+
+        // FlowFile Queued times should match
+        assertEquals("Queued times should be equal.", flowFilesUpdated.get(0).getLastQueueDate(), flowFilesUpdated.get(99).getLastQueueDate());
     }
 
     @Test

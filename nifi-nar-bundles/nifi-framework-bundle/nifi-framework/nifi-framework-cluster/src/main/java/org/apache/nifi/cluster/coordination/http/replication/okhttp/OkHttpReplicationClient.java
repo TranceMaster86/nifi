@@ -17,6 +17,10 @@
 
 package org.apache.nifi.cluster.coordination.http.replication.okhttp;
 
+import com.fasterxml.jackson.annotation.JsonInclude.Include;
+import com.fasterxml.jackson.annotation.JsonInclude.Value;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.module.jaxb.JaxbAnnotationIntrospector;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.FileInputStream;
@@ -35,8 +39,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import java.util.zip.GZIPInputStream;
-
-import javax.net.ssl.HostnameVerifier;
 import javax.net.ssl.KeyManager;
 import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
@@ -48,7 +50,14 @@ import javax.ws.rs.HttpMethod;
 import javax.ws.rs.core.MultivaluedHashMap;
 import javax.ws.rs.core.MultivaluedMap;
 import javax.ws.rs.core.Response;
-
+import okhttp3.Call;
+import okhttp3.ConnectionPool;
+import okhttp3.Headers;
+import okhttp3.HttpUrl;
+import okhttp3.MediaType;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.RequestBody;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.nifi.cluster.coordination.http.replication.HttpReplicationClient;
 import org.apache.nifi.cluster.coordination.http.replication.PreparedRequest;
@@ -62,20 +71,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.util.StreamUtils;
 
-import com.fasterxml.jackson.annotation.JsonInclude.Include;
-import com.fasterxml.jackson.annotation.JsonInclude.Value;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.module.jaxb.JaxbAnnotationIntrospector;
-
-import okhttp3.Call;
-import okhttp3.ConnectionPool;
-import okhttp3.Headers;
-import okhttp3.HttpUrl;
-import okhttp3.MediaType;
-import okhttp3.OkHttpClient;
-import okhttp3.Request;
-import okhttp3.RequestBody;
-
 public class OkHttpReplicationClient implements HttpReplicationClient {
     private static final Logger logger = LoggerFactory.getLogger(OkHttpReplicationClient.class);
     private static final Set<String> gzipEncodings = Stream.of("gzip", "x-gzip").collect(Collectors.toSet());
@@ -86,23 +81,46 @@ public class OkHttpReplicationClient implements HttpReplicationClient {
     private final ObjectMapper jsonCodec = new ObjectMapper();
     private final OkHttpClient okHttpClient;
 
-    public OkHttpReplicationClient(final NiFiProperties properties, final HostnameVerifier hostnameVerifier) {
+    public OkHttpReplicationClient(final NiFiProperties properties) {
         jsonCodec.setDefaultPropertyInclusion(Value.construct(Include.NON_NULL, Include.ALWAYS));
         jsonCodec.setAnnotationIntrospector(new JaxbAnnotationIntrospector(jsonCodec.getTypeFactory()));
 
         jsonSerializer = new JsonEntitySerializer(jsonCodec);
         xmlSerializer = new XmlEntitySerializer();
 
-        okHttpClient = createOkHttpClient(properties, hostnameVerifier);
+        okHttpClient = createOkHttpClient(properties);
     }
 
     @Override
     public PreparedRequest prepareRequest(final String method, final Map<String, String> headers, final Object entity) {
         final boolean gzip = isUseGzip(headers);
+        checkContentLengthHeader(method, headers);
         final RequestBody requestBody = createRequestBody(headers, entity, gzip);
 
         final Map<String, String> updatedHeaders = gzip ? updateHeadersForGzip(headers) : headers;
         return new OkHttpPreparedRequest(method, updatedHeaders, entity, requestBody);
+    }
+
+    /**
+     * Checks the content length header on DELETE requests to ensure it is set to '0', avoiding request timeouts on replicated requests.
+     * @param method the HTTP method of the request
+     * @param headers the header keys and values
+     */
+    private void checkContentLengthHeader(String method, Map<String, String> headers) {
+        // Only applies to DELETE requests
+        if (HttpMethod.DELETE.equalsIgnoreCase(method)) {
+            // Find the Content-Length header if present
+            final String CONTENT_LENGTH_HEADER_KEY = "Content-Length";
+            Map.Entry<String, String> contentLengthEntry = headers.entrySet().stream().filter(entry -> entry.getKey().equalsIgnoreCase(CONTENT_LENGTH_HEADER_KEY)).findFirst().orElse(null);
+            // If no CL header, do nothing
+            if (contentLengthEntry != null) {
+                // If the provided CL value is non-zero, override it
+                if (contentLengthEntry.getValue() != null && !contentLengthEntry.getValue().equalsIgnoreCase("0")) {
+                    logger.warn("This is a DELETE request; the provided Content-Length was {}; setting Content-Length to 0", contentLengthEntry.getValue());
+                    headers.put(CONTENT_LENGTH_HEADER_KEY, "0");
+                }
+            }
+        }
     }
 
     @Override
@@ -144,7 +162,7 @@ public class OkHttpReplicationClient implements HttpReplicationClient {
         final String contentEncoding = callResponse.header("Content-Encoding");
         if (gzipEncodings.contains(contentEncoding)) {
             try (final InputStream gzipIn = new GZIPInputStream(new ByteArrayInputStream(rawBytes));
-                final ByteArrayOutputStream baos = new ByteArrayOutputStream()) {
+                 final ByteArrayOutputStream baos = new ByteArrayOutputStream()) {
 
                 StreamUtils.copy(gzipIn, baos);
                 return baos.toByteArray();
@@ -187,7 +205,7 @@ public class OkHttpReplicationClient implements HttpReplicationClient {
 
     @SuppressWarnings("unchecked")
     private HttpUrl buildUrl(final OkHttpPreparedRequest request, final String uri) {
-        HttpUrl.Builder urlBuilder = HttpUrl.parse(uri.toString()).newBuilder();
+        HttpUrl.Builder urlBuilder = HttpUrl.parse(uri).newBuilder();
         switch (request.getMethod().toUpperCase()) {
             case HttpMethod.DELETE:
             case HttpMethod.HEAD:
@@ -230,7 +248,7 @@ public class OkHttpReplicationClient implements HttpReplicationClient {
 
     private byte[] serializeEntity(final Object entity, final String contentType, final boolean gzip) {
         try (final ByteArrayOutputStream baos = new ByteArrayOutputStream();
-            final OutputStream out = gzip ? new GZIPOutputStream(baos, 1) : baos) {
+             final OutputStream out = gzip ? new GZIPOutputStream(baos, 1) : baos) {
 
             getSerializer(contentType).serialize(entity, out);
             out.close();
@@ -273,14 +291,14 @@ public class OkHttpReplicationClient implements HttpReplicationClient {
         } else {
             final String[] acceptEncodingTokens = rawAcceptEncoding.split(",");
             return Stream.of(acceptEncodingTokens)
-                .map(String::trim)
-                .filter(enc -> StringUtils.isNotEmpty(enc))
-                .map(String::toLowerCase)
-                .anyMatch(gzipEncodings::contains);
+                    .map(String::trim)
+                    .filter(StringUtils::isNotEmpty)
+                    .map(String::toLowerCase)
+                    .anyMatch(gzipEncodings::contains);
         }
     }
 
-    private OkHttpClient createOkHttpClient(final NiFiProperties properties, final HostnameVerifier hostnameVerifier) {
+    private OkHttpClient createOkHttpClient(final NiFiProperties properties) {
         final String connectionTimeout = properties.getClusterNodeConnectionTimeout();
         final long connectionTimeoutMs = FormatUtils.getTimeDuration(connectionTimeout, TimeUnit.MILLISECONDS);
         final String readTimeout = properties.getClusterNodeReadTimeout();
@@ -296,10 +314,6 @@ public class OkHttpReplicationClient implements HttpReplicationClient {
         final Tuple<SSLSocketFactory, X509TrustManager> tuple = createSslSocketFactory(properties);
         if (tuple != null) {
             okHttpClientBuilder.sslSocketFactory(tuple.getKey(), tuple.getValue());
-        }
-
-        if (hostnameVerifier != null) {
-            okHttpClientBuilder.hostnameVerifier(hostnameVerifier);
         }
 
         return okHttpClientBuilder.build();

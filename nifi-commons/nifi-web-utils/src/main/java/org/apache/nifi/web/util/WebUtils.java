@@ -21,18 +21,19 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
-
+import java.util.stream.Stream;
 import javax.net.ssl.SSLContext;
+import javax.servlet.ServletRequest;
 import javax.servlet.http.HttpServletRequest;
 import javax.ws.rs.client.Client;
 import javax.ws.rs.client.ClientBuilder;
 import javax.ws.rs.core.UriBuilderException;
-
 import org.apache.commons.lang3.StringUtils;
 import org.glassfish.jersey.client.ClientConfig;
 import org.glassfish.jersey.jackson.internal.jackson.jaxrs.json.JacksonJaxbJsonProvider;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.apache.http.conn.ssl.DefaultHostnameVerifier;
 
 /**
  * Common utilities related to web development.
@@ -45,6 +46,7 @@ public final class WebUtils {
 
     private static final String PROXY_CONTEXT_PATH_HTTP_HEADER = "X-ProxyContextPath";
     private static final String FORWARDED_CONTEXT_HTTP_HEADER = "X-Forwarded-Context";
+    private static final String FORWARDED_PREFIX_HTTP_HEADER = "X-Forwarded-Prefix";
 
     private WebUtils() {
     }
@@ -94,8 +96,8 @@ public final class WebUtils {
 
         if (ctx != null) {
 
-            // custom hostname verifier that checks subject alternative names against the hostname of the URI
-            clientBuilder = clientBuilder.sslContext(ctx).hostnameVerifier(new NiFiHostnameVerifier());
+            // Apache http DefaultHostnameVerifier that checks subject alternative names against the hostname of the URI
+            clientBuilder = clientBuilder.sslContext(ctx).hostnameVerifier(new DefaultHostnameVerifier());
         }
 
         clientBuilder = clientBuilder.register(ObjectMapperResolver.class).register(JacksonJaxbJsonProvider.class);
@@ -177,7 +179,30 @@ public final class WebUtils {
     }
 
     /**
-     * Determines the context path if populated in {@code X-ProxyContextPath} or {@code X-ForwardContext} headers. If not populated, returns an empty string.
+     * Returns a "safe" context path value from the request headers to use in a proxy environment.
+     * This is used on the JSP to build the resource paths for the external resources (CSS, JS, etc.).
+     * If no headers are present specifying this value, it is an empty string.
+     *
+     * @param request the HTTP request
+     * @return the context path safe to be printed to the page
+     */
+    public static String sanitizeContextPath(ServletRequest request, String whitelistedContextPaths, String jspDisplayName) {
+        if (StringUtils.isBlank(jspDisplayName)) {
+            jspDisplayName = "JSP page";
+        }
+        String contextPath = normalizeContextPath(determineContextPath((HttpServletRequest) request));
+        try {
+            verifyContextPath(whitelistedContextPaths, contextPath);
+            return contextPath;
+        } catch (UriBuilderException e) {
+            logger.error("Error determining context path on " + jspDisplayName + ": " + e.getMessage());
+            return "";
+        }
+    }
+
+    /**
+     * Determines the context path if populated in {@code X-ProxyContextPath}, {@code X-ForwardContext},
+     * or {@code X-Forwarded-Prefix} headers.  If not populated, returns an empty string.
      *
      * @param request the HTTP request
      * @return the provided context path or an empty string
@@ -186,18 +211,20 @@ public final class WebUtils {
         String contextPath = request.getContextPath();
         String proxyContextPath = request.getHeader(PROXY_CONTEXT_PATH_HTTP_HEADER);
         String forwardedContext = request.getHeader(FORWARDED_CONTEXT_HTTP_HEADER);
+        String prefix = request.getHeader(FORWARDED_PREFIX_HTTP_HEADER);
 
         logger.debug("Context path: " + contextPath);
         String determinedContextPath = "";
 
-        // If either header is set, log both
-        if (anyNotBlank(proxyContextPath, forwardedContext)) {
+        // If a context path header is set, log each
+        if (anyNotBlank(proxyContextPath, forwardedContext, prefix)) {
             logger.debug(String.format("On the request, the following context paths were parsed" +
-                            " from headers:\n\t X-ProxyContextPath: %s\n\tX-Forwarded-Context: %s",
-                    proxyContextPath, forwardedContext));
+                            " from headers:\n\t X-ProxyContextPath: %s\n\tX-Forwarded-Context: %s\n\tX-Forwarded-Prefix: %s",
+                    proxyContextPath, forwardedContext, prefix));
 
-            // Implementing preferred order here: PCP, FCP
-            determinedContextPath = StringUtils.isNotBlank(proxyContextPath) ? proxyContextPath : forwardedContext;
+            // Implementing preferred order here: PCP, FC, FP
+            determinedContextPath = Stream.of(proxyContextPath, forwardedContext, prefix)
+                    .filter(StringUtils::isNotBlank).findFirst().orElse("");
         }
 
         logger.debug("Determined context path: " + determinedContextPath);

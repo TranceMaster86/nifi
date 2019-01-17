@@ -16,18 +16,13 @@
  */
 package org.apache.nifi.amqp.processors;
 
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.LinkedBlockingQueue;
-
-import javax.net.ssl.SSLContext;
-
+import com.rabbitmq.client.Connection;
+import com.rabbitmq.client.ConnectionFactory;
+import com.rabbitmq.client.DefaultSaslConfig;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.nifi.annotation.lifecycle.OnStopped;
-import org.apache.nifi.authentication.exception.ProviderCreationException;
 import org.apache.nifi.components.PropertyDescriptor;
+import org.apache.nifi.expression.ExpressionLanguageScope;
 import org.apache.nifi.processor.AbstractProcessor;
 import org.apache.nifi.processor.ProcessContext;
 import org.apache.nifi.processor.ProcessSession;
@@ -36,9 +31,12 @@ import org.apache.nifi.processor.util.StandardValidators;
 import org.apache.nifi.security.util.SslContextFactory;
 import org.apache.nifi.ssl.SSLContextService;
 
-import com.rabbitmq.client.Connection;
-import com.rabbitmq.client.ConnectionFactory;
-import com.rabbitmq.client.DefaultSaslConfig;
+import javax.net.ssl.SSLContext;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
 
 
 /**
@@ -56,27 +54,31 @@ abstract class AbstractAMQPProcessor<T extends AMQPWorker> extends AbstractProce
             .description("Network address of AMQP broker (e.g., localhost)")
             .required(true)
             .defaultValue("localhost")
-            .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
+            .expressionLanguageSupported(ExpressionLanguageScope.VARIABLE_REGISTRY)
+            .addValidator(StandardValidators.NON_EMPTY_EL_VALIDATOR)
             .build();
     public static final PropertyDescriptor PORT = new PropertyDescriptor.Builder()
             .name("Port")
             .description("Numeric value identifying Port of AMQP broker (e.g., 5671)")
             .required(true)
             .defaultValue("5672")
+            .expressionLanguageSupported(ExpressionLanguageScope.VARIABLE_REGISTRY)
             .addValidator(StandardValidators.PORT_VALIDATOR)
             .build();
     public static final PropertyDescriptor V_HOST = new PropertyDescriptor.Builder()
             .name("Virtual Host")
             .description("Virtual Host name which segregates AMQP system for enhanced security.")
             .required(false)
-            .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
+            .expressionLanguageSupported(ExpressionLanguageScope.VARIABLE_REGISTRY)
+            .addValidator(StandardValidators.NON_EMPTY_EL_VALIDATOR)
             .build();
     public static final PropertyDescriptor USER = new PropertyDescriptor.Builder()
             .name("User Name")
             .description("User Name used for authentication and authorization.")
             .required(true)
             .defaultValue("guest")
-            .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
+            .expressionLanguageSupported(ExpressionLanguageScope.VARIABLE_REGISTRY)
+            .addValidator(StandardValidators.NON_EMPTY_EL_VALIDATOR)
             .build();
     public static final PropertyDescriptor PASSWORD = new PropertyDescriptor.Builder()
             .name("Password")
@@ -145,7 +147,7 @@ abstract class AbstractAMQPProcessor<T extends AMQPWorker> extends AbstractProce
 
     /**
      * Will builds target resource ({@link AMQPPublisher} or {@link AMQPConsumer}) upon first invocation and will delegate to the
-     * implementation of {@link #processResource(ProcessContext, ProcessSession)} method for further processing.
+     * implementation of {@link #processResource} method for further processing.
      */
     @Override
     public final void onTrigger(final ProcessContext context, final ProcessSession session) throws ProcessException {
@@ -204,12 +206,12 @@ abstract class AbstractAMQPProcessor<T extends AMQPWorker> extends AbstractProce
 
     protected Connection createConnection(ProcessContext context) {
         final ConnectionFactory cf = new ConnectionFactory();
-        cf.setHost(context.getProperty(HOST).getValue());
-        cf.setPort(Integer.parseInt(context.getProperty(PORT).getValue()));
-        cf.setUsername(context.getProperty(USER).getValue());
+        cf.setHost(context.getProperty(HOST).evaluateAttributeExpressions().getValue());
+        cf.setPort(Integer.parseInt(context.getProperty(PORT).evaluateAttributeExpressions().getValue()));
+        cf.setUsername(context.getProperty(USER).evaluateAttributeExpressions().getValue());
         cf.setPassword(context.getProperty(PASSWORD).getValue());
 
-        final String vHost = context.getProperty(V_HOST).getValue();
+        final String vHost = context.getProperty(V_HOST).evaluateAttributeExpressions().getValue();
         if (vHost != null) {
             cf.setVirtualHost(vHost);
         }
@@ -219,7 +221,7 @@ abstract class AbstractAMQPProcessor<T extends AMQPWorker> extends AbstractProce
         final SSLContextService sslService = context.getProperty(SSL_CONTEXT_SERVICE).asControllerService(SSLContextService.class);
         // if the property to use cert authentication is set but the SSL service hasn't been configured, throw an exception.
         if (useCertAuthentication && sslService == null) {
-            throw new ProviderCreationException("This processor is configured to use cert authentication, " +
+            throw new IllegalStateException("This processor is configured to use cert authentication, " +
                     "but the SSL Context Service hasn't been configured. You need to configure the SSL Context Service.");
         }
         final String rawClientAuth = context.getProperty(CLIENT_AUTH).getValue();
@@ -232,7 +234,7 @@ abstract class AbstractAMQPProcessor<T extends AMQPWorker> extends AbstractProce
                 try {
                     clientAuth = SSLContextService.ClientAuth.valueOf(rawClientAuth);
                 } catch (final IllegalArgumentException iae) {
-                    throw new ProviderCreationException(String.format("Unrecognized client auth '%s'. Possible values are [%s]",
+                    throw new IllegalStateException(String.format("Unrecognized client auth '%s'. Possible values are [%s]",
                             rawClientAuth, StringUtils.join(SslContextFactory.ClientAuth.values(), ", ")));
                 }
             }
