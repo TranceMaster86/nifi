@@ -18,12 +18,13 @@
 package org.apache.nifi.oauth;
 
 import org.apache.nifi.reporting.InitializationException;
-import org.apache.oltu.oauth2.common.exception.OAuthProblemException;
-import org.apache.oltu.oauth2.common.exception.OAuthSystemException;
 import org.eclipse.jetty.http.HttpStatus;
 import org.eclipse.jetty.servlet.ServletHandler;
 import org.json.JSONObject;
-import org.junit.*;
+import org.junit.Assert;
+import org.junit.BeforeClass;
+import org.junit.Ignore;
+import org.junit.Test;
 
 import javax.servlet.http.HttpServlet;
 import javax.servlet.http.HttpServletRequest;
@@ -60,7 +61,7 @@ public class TestOAuth2ClientCredentialsGrantControllerService extends OAuth2Tes
 
     @Test
     @Ignore
-    public void testAuthenticate() {
+    public void testAuthenticate() throws InitializationException {
         setDefaultSSLSocketFactory();
 
         OAuth2ClientCredentialsGrantControllerService testAuthenticateService =
@@ -85,7 +86,7 @@ public class TestOAuth2ClientCredentialsGrantControllerService extends OAuth2Tes
                 OAuth2ClientCredentialsGrantControllerService.RESPONSE_TOKEN_TYPE_FIELD_NAME, FIELD_TOKEN_TYPE);
         runner.enableControllerService(testAuthenticateService);
 
-	OAuth2ClientCredentialsGrantControllerService testAuthenticateService = (OAuth2ClientCredentialsGrantControllerService) runner.getControllerService("testAuthenticate");
+	    testAuthenticateService = (OAuth2ClientCredentialsGrantControllerService) runner.getControllerService("testAuthenticate");
         Assert.assertTrue(testAuthenticateService.authenticate());
     }
 

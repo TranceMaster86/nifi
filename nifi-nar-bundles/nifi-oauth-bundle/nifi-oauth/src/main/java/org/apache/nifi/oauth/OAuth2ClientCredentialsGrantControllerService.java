@@ -17,12 +17,6 @@
 
 package org.apache.nifi.oauth;
 
-import java.util.ArrayList;
-import java.util.Base64;
-import java.util.Collections;
-import java.util.Iterator;
-import java.util.List;
-
 import org.apache.nifi.annotation.documentation.CapabilityDescription;
 import org.apache.nifi.annotation.documentation.Tags;
 import org.apache.nifi.annotation.lifecycle.OnDisabled;
@@ -35,6 +29,10 @@ import org.apache.nifi.reporting.InitializationException;
 import org.apache.oltu.oauth2.client.HttpClient;
 import org.apache.oltu.oauth2.client.request.OAuthClientRequest;
 import org.apache.oltu.oauth2.common.message.types.GrantType;
+
+import java.util.*;
+
+import static org.apache.nifi.expression.ExpressionLanguageScope.FLOWFILE_ATTRIBUTES;
 
 @Tags({ "oauth2", "client", "secret", "post"})
 @CapabilityDescription("POSTs the ClientId and ClientSecret to the OAuth2 authentication server to retrieve the" +
@@ -49,7 +47,7 @@ public class OAuth2ClientCredentialsGrantControllerService
             .displayName("OAuth2 Client ID")
             .description("OAuth2 Client ID passed to the authorization server")
             .required(true)
-            .expressionLanguageSupported(true)
+            .expressionLanguageSupported(FLOWFILE_ATTRIBUTES)
             .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
             .build();
 
@@ -59,7 +57,7 @@ public class OAuth2ClientCredentialsGrantControllerService
             .description("OAuth2 Client Secret that will be passed to the authorization server in exchange for an access token")
             .sensitive(true)
             .required(true)
-            .expressionLanguageSupported(true)
+            .expressionLanguageSupported(FLOWFILE_ATTRIBUTES)
             .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
             .build();
 

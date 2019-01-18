@@ -17,17 +17,6 @@
 
 package org.apache.nifi.oauth.httpclient;
 
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
-import java.io.PrintWriter;
-import java.io.StringWriter;
-import java.net.URL;
-import java.net.URLConnection;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-
 import org.apache.commons.io.IOUtils;
 import org.apache.oltu.oauth2.client.HttpClient;
 import org.apache.oltu.oauth2.client.request.OAuthClientRequest;
@@ -42,6 +31,12 @@ import org.apache.oltu.oauth2.common.utils.OAuthUtils;
 import org.json.JSONObject;
 
 import javax.net.ssl.HttpsURLConnection;
+import java.io.*;
+import java.net.URL;
+import java.net.URLConnection;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
 public class OAuthHTTPConnectionClient
     implements HttpClient {
@@ -65,7 +60,7 @@ public class OAuthHTTPConnectionClient
             String requestMethod, Class<T> responseClass) throws OAuthSystemException, OAuthProblemException {
 
         InputStream responseBody = null;
-        URLConnection c;
+        final URLConnection c;
         Map<String, List<String>> responseHeaders = new HashMap<String, List<String>>();
         int responseCode;
         try {
@@ -151,7 +146,6 @@ public class OAuthHTTPConnectionClient
         extends OAuthAccessTokenResponse {
 
         private String accessToken;
-        private int responseCode;
         private String tokenType;
         private long expireTime;
         private long expiresIn;
@@ -161,11 +155,8 @@ public class OAuthHTTPConnectionClient
                 Map<String, List<String>> responseHeaders, String accessTokenName, String tokenTypeName, String scopeName,
                 String expireInName, String expireTimeName) throws OAuthProblemException {
 
-            // TODO: why duplicate initialization?
             setResponseCode(responseCode);
-            this.responseCode = responseCode;
             setContentType(contentType);
-            this.contentType = contentType;
             setHeaders(responseHeaders);
 
             String loginResponseBody = null;
@@ -242,5 +233,6 @@ public class OAuthHTTPConnectionClient
         protected void setResponseCode(int responseCode) {
             this.responseCode = responseCode;
         }
+
     }
 }

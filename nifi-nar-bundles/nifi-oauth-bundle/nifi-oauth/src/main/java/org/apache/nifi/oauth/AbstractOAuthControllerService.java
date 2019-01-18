@@ -17,10 +17,6 @@
 
 package org.apache.nifi.oauth;
 
-import java.util.HashMap;
-import java.util.Iterator;
-import java.util.Map;
-
 import org.apache.nifi.components.PropertyDescriptor;
 import org.apache.nifi.components.ValidationContext;
 import org.apache.nifi.components.ValidationResult;
@@ -29,6 +25,12 @@ import org.apache.nifi.controller.AbstractControllerService;
 import org.apache.nifi.controller.ConfigurationContext;
 import org.apache.nifi.processor.util.StandardValidators;
 import org.apache.nifi.reporting.InitializationException;
+
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.Map;
+
+import static org.apache.nifi.expression.ExpressionLanguageScope.FLOWFILE_ATTRIBUTES;
 
 
 public abstract class AbstractOAuthControllerService
@@ -71,7 +73,7 @@ public abstract class AbstractOAuthControllerService
             .description("HTTPS OAuth2 Authorization Server that grants access to the protected resources on " +
                     "the behalf of the resource owner.")
             .required(true)
-            .expressionLanguageSupported(true)
+            .expressionLanguageSupported(FLOWFILE_ATTRIBUTES)
             .addValidator(HTTPS_VALIDATOR)
             .build();
 
@@ -83,41 +85,41 @@ public abstract class AbstractOAuthControllerService
                     " response field is different this is where you can change that.")
             .defaultValue("access_token")
             .required(true)
-            .expressionLanguageSupported(true)
+            .expressionLanguageSupported(FLOWFILE_ATTRIBUTES)
             .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
             .build();
 
     public static final PropertyDescriptor RESPONSE_EXPIRE_TIME_FIELD_NAME = new PropertyDescriptor
-            .Builder().name("JSON_response_access_token_name")
+            .Builder().name("JSON_expire_time_field_name")
             .displayName("JSON response 'expire_time' name")
             .description("Name of the field in the JSON response that contains the expire time. IETF OAuth2 spec " +
                     "default is 'expire_time' if your API provider's" +
                     " response field is different this is where you can change that.")
             .defaultValue("expire_time")
             .required(true)
-            .expressionLanguageSupported(true)
+            .expressionLanguageSupported(FLOWFILE_ATTRIBUTES)
             .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
             .build();
 
     public static final PropertyDescriptor RESPONSE_EXPIRE_IN_FIELD_NAME = new PropertyDescriptor
-            .Builder().name("JSON_response_access_token_name")
+            .Builder().name("JSON_expire_in_field_name")
             .displayName("JSON response 'expire_in' name")
             .description("Name of the field in the JSON response that contains the expire in. IETF OAuth2 spec default is 'expire_in' if your API provider's" +
                     " response field is different this is where you can change that.")
             .defaultValue("expire_in")
             .required(true)
-            .expressionLanguageSupported(true)
+            .expressionLanguageSupported(FLOWFILE_ATTRIBUTES)
             .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
             .build();
 
     public static final PropertyDescriptor RESPONSE_TOKEN_TYPE_FIELD_NAME = new PropertyDescriptor
-            .Builder().name("JSON_response_access_token_name")
+            .Builder().name("JSON_response_token_type_field_name")
             .displayName("JSON response 'token_type' name")
             .description("Name of the field in the JSON response that contains the token type. IETF OAuth2 spec default is 'token_type' if your API provider's" +
                     " response field is different this is where you can change that.")
             .defaultValue("token_type")
             .required(true)
-            .expressionLanguageSupported(true)
+            .expressionLanguageSupported(FLOWFILE_ATTRIBUTES)
             .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
             .build();
 
@@ -128,7 +130,7 @@ public abstract class AbstractOAuthControllerService
                     " response field is different this is where you can change that.")
             .defaultValue("scope")
             .required(true)
-            .expressionLanguageSupported(true)
+            .expressionLanguageSupported(FLOWFILE_ATTRIBUTES)
             .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
             .build();
 
